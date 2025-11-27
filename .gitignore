@@ -1,0 +1,106 @@
+# -------------------------
+# Python
+# -------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.dylib
+
+# Byte-compiled / optimized / DLL files
+*.egg
+*.egg-info/
+.eggs/
+dist/
+build/
+develop-eggs/
+.installed.cfg
+
+# Virtual environment
+.venv/
+venv/
+ENV/
+env/
+pip-wheel-metadata/
+
+# Jupyter notebooks checkpoints
+.ipynb_checkpoints/
+
+# -------------------------
+# VS Code / JetBrains
+# -------------------------
+.vscode/
+.idea/
+
+# -------------------------
+# OS files
+# -------------------------
+.DS_Store
+Thumbs.db
+
+# -------------------------
+# Logs
+# -------------------------
+logs/
+*.log
+
+# -------------------------
+# DVC
+# -------------------------
+*.dvc
+.dvc/tmp/
+.dvc/cache/
+
+# Allow DVC config files (keep pipeline)
+!dvc.yaml
+!.dvcignore
+
+# -------------------------
+# ML Artifacts
+# -------------------------
+artifacts/
+mlruns/
+*.onnx
+*.ckpt
+
+# Hugging Face caches
+root/.cache/huggingface/
+.huggingface/
+cache/
+datasets/
+
+# -------------------------
+# Training outputs
+# -------------------------
+**/checkpoint-*/
+**/runs/
+**/tensorboard/
+
+# -------------------------
+# Environment files
+# -------------------------
+.env
+.env.*
+*.env
+
+# -------------------------
+# Docker
+# -------------------------
+docker-compose.override.yml
+*.tar
+
+# -------------------------
+# Generated data files
+# -------------------------
+data/processed/
+data/interim/
+
+# Keep raw data if needed
+# Remove next line if you want raw data tracked:
+data/raw/
+
+# -------------------------
+# API related
+# -------------------------
+__pypackages__/
