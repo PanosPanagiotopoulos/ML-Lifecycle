@@ -78,13 +78,6 @@ datasets/
 **/tensorboard/
 
 # -------------------------
-# Environment files
-# -------------------------
-.env
-.env.*
-*.env
-
-# -------------------------
 # Docker
 # -------------------------
 docker-compose.override.yml
