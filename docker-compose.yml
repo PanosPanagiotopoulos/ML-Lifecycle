@@ -1,0 +1,56 @@
+version: '3.8'
+
+services:
+  mlflow:
+    build:
+      context: .
+      dockerfile: Dockerfile.mlflow
+    container_name: mlflow-server
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./mlruns:/app/mlruns
+      - ./artifacts:/app/artifacts
+    environment:
+      - MLFLOW_BACKEND_STORE_URI=file:///app/mlruns
+      - MLFLOW_ARTIFACT_LOCATION=/app/artifacts
+    command: mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri file:///app/mlruns --default-artifact-root /app/artifacts
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - mllifecycle
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: inference-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./artifacts:/app/artifacts
+      - ./logs:/app/logs
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - mllifecycle
+
+networks:
+  mllifecycle:
+    driver: bridge
+
+volumes:
+  mlruns:
+  artifacts:
+  logs:

@@ -1,9 +1,10 @@
-"""LLM fine-tuning for PDF-based question answering."""
+"""Production model training pipeline."""
 import os
 import sys
 import logging
 from pathlib import Path
 import json
+from datetime import datetime
 import torch
 from transformers import (
     AutoModelForCausalLM,
@@ -19,13 +20,14 @@ from datasets import Dataset
 from src.common.io_utils import load_yaml, ensure_dir
 from src.common.logger import setup_logger, get_logger
 from src.common.config import Config
+from src.common.experiment_tracker import ExperimentTracker
 from src.data.dataset import load_pdf_documents
+from src.evaluation.performance_metrics import calculate_text_statistics, calculate_perplexity
 
 logger = get_logger("mllifecycle.training")
 
-
-class LLMTrainer:
-    """Fine-tunes Hugging Face LLMs on PDF documents."""
+class ModelTrainer:
+    """Production model training and fine-tuning."""
     
     def __init__(self, config: dict):
         self.config = config
@@ -36,6 +38,13 @@ class LLMTrainer:
         self.tokenizer = None
         self.trainer = None
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        
+        self.experiment_tracker = None
+        if config.get("mlflow", {}).get("enabled", False):
+            self.experiment_tracker = ExperimentTracker(
+                experiment_name=config["mlflow"]["experiment_name"],
+                tracking_uri=config["mlflow"].get("tracking_uri", "file:./mlruns")
+            )
     
     def load_data(self) -> tuple:
         """Load and prepare training data."""
@@ -54,9 +63,6 @@ class LLMTrainer:
                 f"No PDF chunks found in {pdf_dir}. "
                 f"Ensure you have at least one .pdf file in data/raw/"
             )
-        
-        # FOR TESTING: Limit to first 100 samples for faster training
-        documents = documents[:100]
         
         logger.info(f"Loaded {len(documents)} chunks from {len(set(d['source'] for d in documents))} PDFs")
         
@@ -78,17 +84,11 @@ class LLMTrainer:
         
         for doc in documents:
             text = doc["text"]
-            source = doc["source"]
-            
-            instruction = (
-                f"Read the following study guide content from '{source}'. "
-                "You will later be asked questions about it."
-            )
-            prompt = f"### Instruction:\n{instruction}\n\n### Content:\n{text}\n\n### Notes:\n"
+            prompt = f"Question: {text}\n\nAnswer:"
             
             formatted_data.append({
                 "text": prompt,
-                "source": source
+                "source": doc["source"]
             })
         
         dataset = Dataset.from_list(formatted_data)
@@ -158,7 +158,12 @@ class LLMTrainer:
             if use_4bit:
                 self.model = prepare_model_for_kbit_training(self.model)
             
-            target_modules = ["q_proj", "v_proj", "k_proj", "o_proj"]
+            # Set target modules based on model architecture
+            if "gpt2" in model_name.lower() or "distilgpt2" in model_name.lower():
+                target_modules = ["c_attn", "c_proj"]  # GPT-2 style models
+            else:
+                target_modules = ["q_proj", "v_proj", "k_proj", "o_proj"]  # Llama/Phi style models
+            
             lora_config = LoraConfig(
                 r=self.config["trainer"].get("lora_r", 16),
                 lora_alpha=self.config["trainer"].get("lora_alpha", 32),
@@ -248,15 +253,50 @@ class LLMTrainer:
             raise
     
     def evaluate_model(self) -> dict:
-        """Evaluate the fine-tuned model."""
+        """Evaluate the fine-tuned model with basic metrics."""
         logger.info("STEP 3: Evaluation")
         
+        # Standard loss metrics
         metrics = self.trainer.evaluate()
         eval_loss = metrics.get('eval_loss', None)
         
         if eval_loss is not None:
             perplexity = torch.exp(torch.tensor(eval_loss))
+            metrics['perplexity'] = perplexity.item()
             logger.info(f"Eval loss: {eval_loss:.4f}, Perplexity: {perplexity:.2f}")
+        
+        # Sample generation quality check (3 samples)
+        sample_inputs = [
+            "Question: What is machine learning?\n\nAnswer:",
+            "Question: Explain supervised learning.\n\nAnswer:",
+            "Question: What is deep learning?\n\nAnswer:",
+        ]
+        
+        generated_texts = []
+        for prompt in sample_inputs:
+            inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=128)
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=50,
+                    temperature=0.7,
+                    do_sample=True,
+                    pad_token_id=self.tokenizer.pad_token_id
+                )
+            
+            generated = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            generated_texts.append(generated)
+        
+        text_stats = calculate_text_statistics(generated_texts)
+        metrics.update({
+            "sample_avg_length": text_stats["avg_length"],
+            "sample_min_length": length_stats["min_length"],
+            "sample_max_length": length_stats["max_length"],
+        })
+        
+        logger.info(f"Sample generation avg length: {length_stats['avg_length']:.1f} chars")
         
         return metrics
     
@@ -286,19 +326,56 @@ class LLMTrainer:
         """Run complete LLM fine-tuning pipeline."""
         logger.info("Starting LLM Fine-tuning Pipeline")
         
+        if self.experiment_tracker:
+            self.experiment_tracker.start_run(run_name=f"train_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        
         try:
             train_docs, val_docs = self.load_data()
+            
+            # Log data params
+            if self.experiment_tracker:
+                self.experiment_tracker.log_params({
+                    "num_train_samples": len(train_docs),
+                    "num_val_samples": len(val_docs),
+                    "chunk_size": self.config["data"].get("chunk_size", 512),
+                    "test_split": self.config["data"].get("test_split", 0.2),
+                })
+            
             train_dataset = self.prepare_dataset(train_docs)
             val_dataset = self.prepare_dataset(val_docs)
             
             self.load_model_and_tokenizer()
+            
+            # Log model params
+            if self.experiment_tracker:
+                self.experiment_tracker.log_params({
+                    "model_name": self.config["trainer"].get("model_name", "gpt2"),
+                    "use_lora": self.config["trainer"].get("use_lora", True),
+                    "lora_r": self.config["trainer"].get("lora_r", 16),
+                    "learning_rate": self.config["trainer"].get("learning_rate", 2e-4),
+                    "num_epochs": self.config["trainer"].get("num_train_epochs", 3),
+                    "batch_size": self.config["trainer"].get("per_device_train_batch_size", 2),
+                })
             
             train_dataset = self.tokenize_dataset(train_dataset)
             val_dataset = self.tokenize_dataset(val_dataset)
             
             self.train_model(train_dataset, val_dataset)
             metrics = self.evaluate_model()
+            
+            # Log metrics
+            if self.experiment_tracker:
+                self.experiment_tracker.log_metrics({
+                    "eval_loss": metrics.get("eval_loss", 0),
+                    "perplexity": metrics.get("perplexity", 0),
+                    "sample_avg_length": metrics.get("sample_avg_length", 0),
+                })
+            
             self.save_model()
+            
+            # Log model artifacts
+            if self.experiment_tracker:
+                self.experiment_tracker.log_artifacts(str(self.model_dir))
             
             logger.info("Fine-tuning complete")
             
@@ -307,6 +384,9 @@ class LLMTrainer:
         except Exception as e:
             logger.error(f"Training failed: {e}", exc_info=True)
             raise
+        finally:
+            if self.experiment_tracker:
+                self.experiment_tracker.end_run()
 
 
 def main():

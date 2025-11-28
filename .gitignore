@@ -104,3 +104,18 @@ data/raw/
 # API related
 # -------------------------
 __pypackages__/
+# MLflow
+mlruns/
+mlartifacts/
+
+# DVC
+.dvc/config.local
+.dvc/tmp
+.dvc/cache
+
+# Monitoring
+logs/predictions/
+
+# Test coverage
+.coverage
+htmlcov/

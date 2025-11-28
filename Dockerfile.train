@@ -1,9 +1,21 @@
 FROM python:3.11-slim
+
 WORKDIR /app
+
+# Install dependencies
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY train.py ./
 COPY src ./src
 COPY configs ./configs
-COPY data ./data
-ENV HF_HOME=/root/.cache/huggingface
-CMD ["python", "-m", "src.training.train", "configs/train.yaml"]
+
+# Create directories for data and artifacts
+RUN mkdir -p data/raw data/processed artifacts/model logs
+
+# Set Hugging Face cache directory
+ENV HF_HOME=/app/.cache/huggingface
+
+# Run training
+CMD ["python", "train.py", "configs/train.yaml"]

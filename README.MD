@@ -1,42 +1,52 @@
-# ML Lifecycle - PDF LLM Fine-tuning
+# ML Lifecycle - Local Setup
 
-Fine-tune large language models on PDF documents for question answering.
+## Step 1: Create Virtual Environment
 
-## Quick Start
+```powershell
+python -m venv .venv
+```
 
-### 1. Install
-```bash
+## Step 2: Activate Virtual Environment
+
+```powershell
+.\.venv\Scripts\Activate
+```
+
+## Step 3: Install Dependencies
+
+```powershell
 pip install -r requirements.txt
 ```
 
-### 2. Add PDFs
-Place PDF files in `data/raw/`
+## Step 4: Train Model
 
-### 3. Train
-```bash
+```powershell
 python train.py configs/train.yaml
 ```
 
-### 4. Serve API
-```bash
-uvicorn src.controller.predict:app --reload
+**Expected time:** 5-10 minutes on CPU
+
+## Step 5: Start MLflow (Terminal 1)
+
+```powershell
+.\.venv\Scripts\Activate
+mlflow ui --host 0.0.0.0 --port 5000
 ```
 
-### 5. Test
-```bash
-curl -X POST http://localhost:8000/ask \
-  -H "Content-Type: application/json" \
-  -d '{"question": "What are the main topics?", "max_length": 200}'
+**Access:** http://localhost:5000
+
+## Step 6: Start API (Terminal 2)
+
+```powershell
+.\.venv\Scripts\Activate
+uvicorn src.controller.predict:app --host 0.0.0.0 --port 8000
 ```
 
-Or visit: http://localhost:8000/docs
+## Requirements
 
-## Configuration
+- **Python:** 3.11+
+- **RAM:** 8-16 GB
+- **Disk:** 5-10 GB free
+- **CPU:** 4+ cores (or GPU for faster training)
 
-Edit `configs/train.yaml` to change model, training parameters, etc.
-
-## Troubleshooting
-
-**Out of memory:** Reduce `per_device_train_batch_size` in `configs/train.yaml`
-
-**Slow training:** Use smaller model: `model_name: "gpt2"`
+---

@@ -1,35 +1,39 @@
-"""FastAPI application for LLM-based question answering."""
-import json
+"""Production FastAPI application for LLM inference."""
+import time
 from pathlib import Path
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from typing import Optional
+import json
+
 import torch
+from fastapi import FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 
-from src.common.logger import setup_logger, get_logger
+from src.common.logger import get_logger
 from src.common.config import Config
+from src.dtos.requests import InferenceRequest, HealthCheckResponse, InferenceResponse
+from src.monitoring.request_logger import RequestLogger
 
 logger = get_logger(__name__)
-
 Config.ensure_directories()
 
-model = None
-tokenizer = None
-generation_config = {}
+model: Optional[AutoModelForCausalLM] = None
+tokenizer: Optional[AutoTokenizer] = None
+generation_config: dict = {}
+request_logger = RequestLogger()
 
-def load_llm_model():
-    """Load the fine-tuned LLM model and tokenizer."""
+
+def load_model() -> bool:
+    """Load fine-tuned model with LoRA adapter."""
     global model, tokenizer, generation_config
     
     try:
         model_path = Config.MODEL_DIR
         
         if not model_path.exists():
-            raise FileNotFoundError(
-                f"Model directory not found: {model_path}. "
-                "Train a model first using: python train.py configs/train.yaml"
-            )
+            logger.warning(f"Model not found at {model_path}. Run training first.")
+            return False
         
         logger.info(f"Loading model from {model_path}")
         
@@ -38,118 +42,123 @@ def load_llm_model():
             with open(config_path) as f:
                 config = json.load(f)
                 generation_config = {
-                    "max_length": config.get("max_length", 512),
+                    "max_length": config.get("max_length", 128),
                     "temperature": config.get("temperature", 0.7),
                     "top_p": config.get("top_p", 0.9),
                 }
-                base_model_name = config.get("model_name", "gpt2")
+                base_model_name = config.get("model_name", "distilgpt2")
         else:
-            logger.warning(f"training_config.json not found, using defaults")
-            base_model_name = "gpt2"
-            generation_config = {"max_length": 512, "temperature": 0.7, "top_p": 0.9}
+            base_model_name = "distilgpt2"
+            generation_config = {"max_length": 128, "temperature": 0.7, "top_p": 0.9}
         
-        try:
-            tokenizer = AutoTokenizer.from_pretrained(
-                str(model_path),
-                trust_remote_code=True
-            )
-        except Exception as e:
-            raise ValueError(f"Cannot load tokenizer. Model files may be corrupted.") from e
-        
+        tokenizer = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
         
-        logger.info("Tokenizer loaded")
-        
         device = "cuda" if torch.cuda.is_available() else "cpu"
+        
         adapter_config_path = model_path / "adapter_config.json"
         
         if adapter_config_path.exists():
-            logger.info("Loading base model + LoRA adapter")
-            try:
-                base_model = AutoModelForCausalLM.from_pretrained(
-                    base_model_name,
-                    device_map="auto" if device == "cuda" else None,
-                    trust_remote_code=True,
-                    torch_dtype=torch.float16 if device == "cuda" else torch.float32
-                )
-                model = PeftModel.from_pretrained(base_model, str(model_path))
-            except Exception as e:
-                raise ValueError(
-                    f"Cannot load LoRA model. Ensure base model '{base_model_name}' is accessible."
-                ) from e
+            logger.info(f"Loading base model '{base_model_name}' with LoRA adapter")
+            base_model = AutoModelForCausalLM.from_pretrained(
+                base_model_name,
+                device_map="auto" if device == "cuda" else None,
+                trust_remote_code=True,
+                torch_dtype=torch.float16 if device == "cuda" else torch.float32
+            )
+            model = PeftModel.from_pretrained(base_model, str(model_path))
         else:
             logger.info("Loading full fine-tuned model")
-            try:
-                model = AutoModelForCausalLM.from_pretrained(
-                    str(model_path),
-                    device_map="auto" if device == "cuda" else None,
-                    trust_remote_code=True,
-                    torch_dtype=torch.float16 if device == "cuda" else torch.float32
-                )
-            except Exception as e:
-                raise ValueError("Cannot load fine-tuned model. Model files may be corrupted.") from e
+            model = AutoModelForCausalLM.from_pretrained(
+                str(model_path),
+                device_map="auto" if device == "cuda" else None,
+                trust_remote_code=True,
+                torch_dtype=torch.float16 if device == "cuda" else torch.float32
+            )
         
         model.eval()
-        logger.info(f"Model loaded on {device}")
+        logger.info(f"Model loaded successfully on {device}")
+        return True
         
     except Exception as e:
-        logger.error(f"Failed to load model: {e}", exc_info=True)
-        raise
+        logger.error(f"Model loading failed: {e}", exc_info=True)
+        return False
 
-try:
-    load_llm_model()
-except Exception as e:
-    logger.error(f"Model loading failed: {e}")
 
 app = FastAPI(
-    title="PDF LLM API",
-    version="2.0.0",
-    description="Question answering API using fine-tuned LLM on PDF documents"
+    title="Document QA API",
+    version="1.0.0",
+    description="Enterprise LLM inference service with monitoring",
+    docs_url="/api/docs",
+    redoc_url="/api/redoc"
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
-class QuestionInput(BaseModel):
-    question: str
-    max_length: int = 200
-    temperature: float = 0.7
-    top_p: float = 0.9
+@app.on_event("startup")
+async def startup_event():
+    """Initialize model on startup."""
+    logger.info("Starting inference service...")
+    success = load_model()
+    if not success:
+        logger.warning("Service started without model. Training required.")
 
 
-class AnswerOutput(BaseModel):
-    answer: str
-    question: str
+@app.get("/health", response_model=HealthCheckResponse)
+async def health_check():
+    """Service health status."""
+    return HealthCheckResponse(
+        status="healthy" if model is not None else "degraded",
+        model_loaded=model is not None,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        model_path=str(Config.MODEL_DIR)
+    )
 
 
-@app.get("/health")
-async def health():
-    """Health check endpoint."""
-    return {
-        "status": "ok",
-        "model_loaded": model is not None,
-        "device": "cuda" if torch.cuda.is_available() else "cpu"
-    }
+@app.get("/metrics")
+async def get_metrics(date: Optional[str] = None):
+    """Get inference metrics for specified date."""
+    return request_logger.get_stats(date)
 
 
-@app.post("/ask", response_model=AnswerOutput)
-async def ask_question(inp: QuestionInput):
-    """Ask a question about the PDF documents the model was trained on."""
+@app.post("/ask", response_model=InferenceResponse, status_code=status.HTTP_200_OK)
+async def generate_answer(request: InferenceRequest):
+    """
+    Generate answer for given question.
+    
+    Args:
+        request: Question and generation parameters
+        
+    Returns:
+        Generated answer with metadata
+        
+    Raises:
+        HTTPException: If model unavailable or generation fails
+    """
     if model is None or tokenizer is None:
-        raise HTTPException(status_code=503, detail="Model not loaded")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Model not available. Run training pipeline first."
+        )
+    
+    start_time = time.time()
     
     try:
-        # Format prompt to match training format
-        instruction = (
-            "Read the following study guide content. "
-            "You will later be asked questions about it."
-        )
-        prompt = f"### Instruction:\n{instruction}\n\n### Content:\n{inp.question}\n\n### Notes:\n"
+        prompt = f"Question: {request.question}\n\nAnswer:"
         
         inputs = tokenizer(
             prompt,
             return_tensors="pt",
             truncation=True,
-            max_length=512
+            max_length=generation_config.get("max_length", 128)
         )
         
         device = next(model.parameters()).device
@@ -158,29 +167,43 @@ async def ask_question(inp: QuestionInput):
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
-                max_length=inp.max_length or generation_config.get("max_length", 200),
-                temperature=inp.temperature or generation_config.get("temperature", 0.7),
-                top_p=inp.top_p or generation_config.get("top_p", 0.9),
+                max_new_tokens=request.max_tokens,
+                temperature=request.temperature,
                 do_sample=True,
                 pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id
+                eos_token_id=tokenizer.eos_token_id,
+                repetition_penalty=1.2
             )
         
         full_response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        answer = full_response.replace(prompt, "").strip()
         
-        # Extract answer after the prompt
-        if "### Notes:" in full_response:
-            answer = full_response.split("### Notes:")[-1].strip()
-        else:
-            answer = full_response.replace(prompt, "").strip()
+        if not answer:
+            answer = "Unable to generate response."
         
-        logger.info(f"Q: {inp.question[:50]}... | A: {answer[:50]}...")
+        latency_ms = (time.time() - start_time) * 1000
+        request_logger.log(
+            question=request.question,
+            answer=answer,
+            latency_ms=latency_ms,
+            metadata={
+                "temperature": request.temperature,
+                "max_tokens": request.max_tokens,
+            }
+        )
         
-        return {
-            "question": inp.question,
-            "answer": answer
-        }
+        logger.info(f"Question processed | Latency: {latency_ms:.0f}ms")
+        
+        return InferenceResponse(question=request.question, answer=answer)
         
     except Exception as e:
         logger.error(f"Generation failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Generation failed: {str(e)}"
+        )
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

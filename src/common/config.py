@@ -35,11 +35,6 @@ class Config:
     MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", str(MLRUNS_DIR))
     MLFLOW_EXPERIMENT = os.getenv("MLFLOW_EXPERIMENT", "pdf_llm_finetuning")
     
-    # API
-    API_HOST = os.getenv("API_HOST", "0.0.0.0")
-    API_PORT = int(os.getenv("API_PORT", "8000"))
-    API_RELOAD = os.getenv("API_RELOAD", "false").lower() == "true"
-    
     # Model serving
     MODEL_CONFIG_PATH = MODEL_DIR / "config.json"
     

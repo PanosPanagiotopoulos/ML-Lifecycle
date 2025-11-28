@@ -1,0 +1,6 @@
+﻿*.pyc
+__pycache__
+.git
+.mlruns
+logs/
+artifacts/model/
