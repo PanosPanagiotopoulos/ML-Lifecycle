@@ -5,14 +5,13 @@ fastapi==0.115.0
 uvicorn==0.30.6
 pydantic==2.12.4
 
-# Core ML (inference only - CPU optimized)
---extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.5.1+cpu
+# Core ML (inference only - CPU optimized, install from PyTorch CPU repo)
+torch==2.5.1
 transformers==4.46.0
 peft==0.13.0
 safetensors==0.7.0
 
-# MLOps (client only)
+# MLOps (lightweight client)
 mlflow-skinny==2.16.0
 
 # Monitoring
