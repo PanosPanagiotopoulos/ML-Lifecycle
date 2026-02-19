@@ -19,6 +19,18 @@ ENV/
 env/
 pip-wheel-metadata/
 
+# Environment files
+services/api/.env
+services/api/.env.*
+services/api/**/.env
+services/api/**/.env.*
+
+services/train/.env
+services/train/.env.*
+services/train/**/.env
+services/train/**/.env.*
+
+
 .ipynb_checkpoints/
 
 .vscode/
