@@ -1,0 +1,22 @@
+{
+  "raw_pdfs_dir": "./data/raw_pdfs",
+  "processed_dir": "./data/processed",
+  "mlflow_tracking_uri": "http://localhost:5000",
+  "base_model_name": "Qwen/Qwen2.5-1.5B-Instruct",
+  "max_length": 512,
+  "chunk_size": 900,
+  "chunk_overlap": 200,
+  "lora_r": 8,
+  "lora_alpha": 16,
+  "lora_dropout": 0.05,
+  "num_train_epochs": 1,
+  "per_device_train_batch_size": 1,
+  "per_device_eval_batch_size": 1,
+  "learning_rate": 0.00005,
+  "warmup_ratio": 0.05,
+  "gradient_accumulation_steps": 8,
+  "eval_ratio": 0.1,
+  "seed": 42,
+  "experiment_name": "uniguide-qwen2.5-1.5b-lora",
+  "registered_model_name": "uniguide-llm"
+}
