@@ -1,4 +1,5 @@
 {
+  "data_root": "./data",
   "raw_pdfs_dir": "./data/raw_pdfs",
   "processed_dir": "./data/processed",
   "mlflow_tracking_uri": "http://localhost:5000",

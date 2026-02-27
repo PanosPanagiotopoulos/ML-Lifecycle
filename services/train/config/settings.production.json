@@ -1,0 +1,6 @@
+{
+  "mlflow_tracking_uri": "http://mlflow:5000",
+  "data_root": "/app/data",
+  "raw_pdfs_dir": "/app/data/raw_pdfs",
+  "processed_dir": "/app/data/processed"
+}

@@ -1,5 +1,4 @@
 import time
-import json
 import os
 import re
 import logging
@@ -7,20 +6,25 @@ import mlflow
 import torch
 from peft import PeftConfig, PeftModel
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from config import ApiConfig
+from app.config import ApiConfig
 
 PROMPT_SUFFIX = "\n\nAnswer:"
 
 
 LOGGER = logging.getLogger("api.inference")
 
-class InferenceService:
+class LLMModelService:
     def __init__(self, cfg: ApiConfig) -> None:
         self._cfg = cfg
-        self._retrieval_top_k = max(1, cfg.retrieval_top_k)
-        LOGGER.info("Using MLflow tracking URI: %s", cfg.mlflow_tracking_uri)
-        mlflow.set_tracking_uri(cfg.mlflow_tracking_uri)
-        self._client = mlflow.tracking.MlflowClient()
+        self._source_mode = cfg.model_source
+        self._client = None
+        if self._source_mode == "registry":
+            LOGGER.info("Using MLflow tracking URI: %s", cfg.mlflow_tracking_uri)
+            mlflow.set_tracking_uri(cfg.mlflow_tracking_uri)
+            self._client = mlflow.tracking.MlflowClient()
+        else:
+            LOGGER.info("Using local model source: %s", cfg.local_model_dir)
+
         self._model_cache: dict[str, tuple[AutoTokenizer, AutoModelForCausalLM]] = {}
         self._models_cache_ttl_seconds = 10.0
         self._models_cache_at = 0.0
@@ -28,11 +32,31 @@ class InferenceService:
 
         self._model_cache[cfg.model_name] = self._load_model(cfg.model_name)
 
-        self._chunks = self._load_chunks(cfg.processed_chunks_path)
+    def _artifact_uri_for_model(self, model_name: str) -> str:
+        if self._cfg.registry_model_uri:
+            uri = self._cfg.registry_model_uri
+            uri = uri.replace("{model}", model_name)
+            uri = uri.replace("{stage}", self._cfg.model_stage)
+            return uri
+        return f"models:/{model_name}/{self._cfg.model_stage}"
 
     def _load_model(self, model_name: str) -> tuple[AutoTokenizer, AutoModelForCausalLM]:
-        uri = f"models:/{model_name}/{self._cfg.model_stage}"
-        local_dir = mlflow.artifacts.download_artifacts(artifact_uri=uri)
+        if self._source_mode == "local":
+            if not self._cfg.local_model_dir:
+                raise ValueError("LOCAL_MODEL_DIR must be configured when MODEL_SOURCE is set to 'local'.")
+            local_dir = self._cfg.local_model_dir
+            if model_name and os.path.basename(local_dir) != model_name:
+                candidate = os.path.join(local_dir, model_name)
+                if os.path.exists(candidate):
+                    local_dir = candidate
+            if not os.path.exists(local_dir):
+                raise FileNotFoundError(
+                    f"The configured LOCAL_MODEL_DIR does not exist or is not accessible: {local_dir}."
+                )
+        else:
+            uri = self._artifact_uri_for_model(model_name)
+            local_dir = mlflow.artifacts.download_artifacts(artifact_uri=uri)
+
         tokenizer, model = self._load_model_and_tokenizer(local_dir)
 
         model.eval()
@@ -52,9 +76,25 @@ class InferenceService:
         return loaded
 
     def list_models(self) -> list[dict]:
+        if self._source_mode == "local":
+            return [
+                {
+                    "id": self._cfg.model_name,
+                    "object": "model",
+                    "owned_by": "local-filesystem",
+                    "version": "local",
+                    "stage": self._cfg.model_stage,
+                }
+            ]
+
         now = time.time()
         if self._models_cache and now - self._models_cache_at <= self._models_cache_ttl_seconds:
             return self._models_cache
+
+        if self._client is None:
+            raise RuntimeError(
+                "MLflow client is not initialized while MODEL_SOURCE is set to 'registry'; verify tracking configuration."
+            )
 
         models = self._client.search_registered_models()
         rows: list[dict] = []
@@ -92,16 +132,17 @@ class InferenceService:
         except Exception:
             return False
 
-    def chunk_count(self) -> int:
-        return len(self._chunks)
-
     def _load_model_and_tokenizer(self, local_dir: str) -> tuple[AutoTokenizer, AutoModelForCausalLM]:
         adapter_config_path = os.path.join(local_dir, "adapter_config.json")
+        hf_token = os.getenv("HF_TOKEN", "").strip() or None
+        if hf_token == "HF_TOKEN":
+            hf_token = None
+
         if os.path.exists(adapter_config_path):
             LOGGER.info("Detected adapter artifact. Loading base model + LoRA adapter.")
             peft_config = PeftConfig.from_pretrained(local_dir)
-            tokenizer = AutoTokenizer.from_pretrained(peft_config.base_model_name_or_path)
-            base_model = AutoModelForCausalLM.from_pretrained(peft_config.base_model_name_or_path)
+            tokenizer = AutoTokenizer.from_pretrained(peft_config.base_model_name_or_path, token=hf_token)
+            base_model = AutoModelForCausalLM.from_pretrained(peft_config.base_model_name_or_path, token=hf_token)
             peft_model = PeftModel.from_pretrained(base_model, local_dir)
             model = peft_model.merge_and_unload()
             return tokenizer, model
@@ -110,47 +151,6 @@ class InferenceService:
         tokenizer = AutoTokenizer.from_pretrained(local_dir)
         model = AutoModelForCausalLM.from_pretrained(local_dir)
         return tokenizer, model
-
-    def _load_chunks(self, chunks_path: str) -> list[str]:
-        if not os.path.exists(chunks_path):
-            LOGGER.warning("Chunks file not found at %s. Retrieval context disabled.", chunks_path)
-            return []
-
-        rows: list[str] = []
-        with open(chunks_path, "r", encoding="utf-8") as f:
-            for line in f:
-                row = json.loads(line)
-                text = (row.get("text") or "").strip()
-                if text:
-                    rows.append(text)
-
-        LOGGER.info("Loaded retrieval chunks: %s", len(rows))
-        return rows
-
-    def _tokenize_for_retrieval(self, text: str) -> set[str]:
-        return set(re.findall(r"[a-zA-Z0-9]+", text.lower()))
-
-    def _retrieve_context(self, question: str) -> list[str]:
-        if not self._chunks:
-            return []
-
-        q_tokens = self._tokenize_for_retrieval(question)
-        if not q_tokens:
-            return []
-
-        scored: list[tuple[float, str]] = []
-        for chunk in self._chunks:
-            c_tokens = self._tokenize_for_retrieval(chunk)
-            if not c_tokens:
-                continue
-            overlap = q_tokens.intersection(c_tokens)
-            if not overlap:
-                continue
-            score = len(overlap) / (len(q_tokens) ** 0.5 * len(c_tokens) ** 0.5)
-            scored.append((score, chunk))
-
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return [chunk for _, chunk in scored[: self._retrieval_top_k]]
 
     def ask(
         self,
@@ -163,35 +163,50 @@ class InferenceService:
         selected_model = model_name or self._cfg.model_name
         tokenizer, model = self._get_or_load_model(selected_model)
 
-        retrieved_chunks = self._retrieve_context(question)
-        context_blocks: list[str] = []
         if course_guide_context and course_guide_context.strip():
-            context_blocks.append(course_guide_context.strip())
-        context_blocks.extend(retrieved_chunks)
-
-        context_text = "\n\n---\n\n".join(context_blocks) if context_blocks else "No additional course-guide context available."
-        prompt = (
-            "You are a university course-guide assistant. Use the provided context when relevant. "
-            "If context is insufficient, answer cautiously and say what is missing.\n\n"
-            f"Context:\n{context_text}\n\n"
-            f"Question: {question}{PROMPT_SUFFIX}"
-        )
+            context_text = course_guide_context.strip()
+            prompt = (
+                "You are a university course-guide assistant. Use the provided context when relevant. "
+                "If context is insufficient, answer cautiously and say what is missing.\n\n"
+                f"Context:\n{context_text}\n\n"
+                f"Question: {question}{PROMPT_SUFFIX}"
+            )
+        else:
+            prompt = (
+                "You are a university course-guide assistant. Answer the question directly and concisely.\n\n"
+                f"Question: {question}{PROMPT_SUFFIX}"
+            )
 
         start = time.perf_counter()
 
         inputs = tokenizer(prompt, return_tensors="pt")
+        capped_max_new_tokens = max(16, min(max_new_tokens, 160))
+        use_sampling = temperature > 0.25
+
+        generation_kwargs = {
+            **inputs,
+            "max_new_tokens": capped_max_new_tokens,
+            "pad_token_id": tokenizer.eos_token_id,
+            "eos_token_id": tokenizer.eos_token_id,
+            "repetition_penalty": 1.15,
+            "no_repeat_ngram_size": 3,
+            "do_sample": use_sampling,
+        }
+        if use_sampling:
+            generation_kwargs["temperature"] = max(0.2, min(temperature, 0.9))
+            generation_kwargs["top_p"] = 0.9
+
         with torch.no_grad():
-            output = model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=True,
-                temperature=temperature,
-                pad_token_id=tokenizer.eos_token_id,
-            )
+            output = model.generate(**generation_kwargs)
 
         text = tokenizer.decode(output[0], skip_special_tokens=True)
-        
+
         answer = text.split(PROMPT_SUFFIX, 1)[-1].strip()
+        answer = re.split(r"\n+\s*Question\s*:\s*", answer, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+        while answer.lower().startswith("answer:"):
+            answer = answer[len("answer:"):].strip()
+        if not answer:
+            answer = "I could not generate a reliable answer for this request."
 
         latency_ms = (time.perf_counter() - start) * 1000.0
         return answer, latency_ms

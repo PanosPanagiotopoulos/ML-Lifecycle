@@ -2,9 +2,11 @@
   "mlflow_tracking_uri": "http://mlflow:5000",
   "model_name": "uniguide-llm",
   "model_stage": "Production",
-  "log_dir": "/app/data/logs",
-  "processed_chunks_path": "/app/data/processed/chunks.jsonl",
-  "retrieval_top_k": 3,
+  "model_source": "registry",
+  "registry_model_uri": null,
+  "local_model_dir": null,
+  "data_root": "./data",
+  "log_dir": "./data/logs",
   "chat_default_max_tokens": 120,
   "chat_default_temperature": 0.7
 }

@@ -1,0 +1,6 @@
+{
+  "mlflow_tracking_uri": "http://localhost:5000",
+  "data_root": "./data",
+  "log_dir": "./data/logs",
+  "model_source": "registry"
+}

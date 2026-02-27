@@ -3,6 +3,7 @@ import math
 import inspect
 import mlflow
 import torch
+from huggingface_hub import login, snapshot_download
 from datasets import load_dataset
 from transformers import (
     AutoTokenizer,
@@ -77,6 +78,46 @@ def _build_training_args(cfg: TrainConfig, non_empty_records: int) -> TrainingAr
 
     return TrainingArguments(**kwargs)
 
+
+def _prepare_hf_runtime(cfg: TrainConfig) -> str:
+    token = (getattr(cfg, "hf_token", None) or os.getenv("HF_TOKEN", "")).strip()
+    if token == "HF_TOKEN":
+        token = ""
+
+    os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+    os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
+
+    cache_dir = (
+        getattr(cfg, "hf_cache_dir", None)
+        or os.getenv("HF_HOME")
+        or os.getenv("HUGGINGFACE_HUB_CACHE")
+        or None
+    )
+
+    if token:
+        login(token=token, add_to_git_credential=False)
+
+    return snapshot_download(
+        repo_id=cfg.base_model_name,
+        token=token or None,
+        cache_dir=cache_dir,
+        resume_download=True,
+    )
+
+
+def _load_base_model(model_source: str):
+    use_cuda = torch.cuda.is_available()
+    model_kwargs = {"low_cpu_mem_usage": True}
+    if use_cuda:
+        model_kwargs["dtype"] = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+
+    try:
+        return AutoModelForCausalLM.from_pretrained(model_source, **model_kwargs)
+    except TypeError:
+        if "dtype" in model_kwargs:
+            model_kwargs["torch_dtype"] = model_kwargs.pop("dtype")
+        return AutoModelForCausalLM.from_pretrained(model_source, **model_kwargs)
+
 def train() -> None:
     cfg = TrainConfig.load()
     LOGGER.info("Training config loaded")
@@ -87,6 +128,10 @@ def train() -> None:
 
     set_seed(cfg.seed)
     LOGGER.info("Random seed set")
+
+    LOGGER.info("Preparing Hugging Face runtime and local model snapshot")
+    model_source = _prepare_hf_runtime(cfg)
+    LOGGER.info("Base model snapshot prepared: %s", model_source)
 
     dataset_path = os.path.join(cfg.processed_dir, "train.jsonl")
     if not os.path.exists(dataset_path):
@@ -105,7 +150,7 @@ def train() -> None:
     ds = ds.train_test_split(test_size=cfg.eval_ratio, seed=cfg.seed)
     LOGGER.info("Train/test split complete")
 
-    tokenizer = AutoTokenizer.from_pretrained(cfg.base_model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_source)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     LOGGER.info("Tokenizer loaded")
@@ -121,15 +166,7 @@ def train() -> None:
     tokenized = ds.map(tokenize, batched=True, remove_columns=ds["train"].column_names)
     LOGGER.info("Dataset tokenized")
 
-    torch_dtype = torch.float32
-    if torch.cuda.is_available():
-        torch_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-
-    base_model = AutoModelForCausalLM.from_pretrained(
-        cfg.base_model_name,
-        torch_dtype=torch_dtype,
-        low_cpu_mem_usage=True,
-    )
+    base_model = _load_base_model(model_source)
     LOGGER.info("Base model loaded")
 
     use_fan_in_fan_out = getattr(base_model.config, "model_type", "") == "gpt2"

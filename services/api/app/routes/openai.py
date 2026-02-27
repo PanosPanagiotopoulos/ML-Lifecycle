@@ -2,9 +2,9 @@ import time
 import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from deps import get_config, get_inference_service
-from config import ApiConfig
-from services.inference_service import InferenceService
+from app.deps import get_config, get_llm_model_service
+from app.config import ApiConfig
+from app.services.llm_model_service import LLMModelService
 
 
 router = APIRouter(prefix="/v1")
@@ -23,8 +23,8 @@ class ChatCompletionRequest(BaseModel):
 
 
 @router.get("/models")
-def list_models(svc: InferenceService = Depends(get_inference_service)) -> dict:
-    models = svc.list_models()
+def list_models(llm_model_service: LLMModelService = Depends(get_llm_model_service)) -> dict:
+    models = llm_model_service.list_models()
     return {
         "object": "list",
         "data": models,
@@ -35,15 +35,26 @@ def list_models(svc: InferenceService = Depends(get_inference_service)) -> dict:
 def create_chat_completion(
     req: ChatCompletionRequest,
     cfg: ApiConfig = Depends(get_config),
-    svc: InferenceService = Depends(get_inference_service),
+    llm_model_service: LLMModelService = Depends(get_llm_model_service),
 ) -> dict:
-    model_ids = {m["id"] for m in svc.list_models()}
+    model_ids = {m["id"] for m in llm_model_service.list_models()}
     if req.model not in model_ids:
-        raise HTTPException(status_code=404, detail="model_not_available")
+        available_models = sorted(model_ids)
+        available_text = ", ".join(available_models) if available_models else "none"
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Model '{req.model}' is not available in the current deployment; "
+                f"available models: {available_text}."
+            ),
+        )
 
     user_messages = [m.content for m in req.messages if m.role == "user"]
     if not user_messages:
-        raise HTTPException(status_code=400, detail="At least one user message is required")
+        raise HTTPException(
+            status_code=400,
+            detail="The request must include at least one non-empty message with role 'user' in the messages array.",
+        )
 
     system_messages = [m.content for m in req.messages if m.role == "system"]
     system_context = "\n\n".join(system_messages).strip() if system_messages else None
@@ -52,7 +63,7 @@ def create_chat_completion(
     try:
         max_tokens = req.max_tokens if req.max_tokens is not None else cfg.chat_default_max_tokens
         temperature = req.temperature if req.temperature is not None else cfg.chat_default_temperature
-        answer, latency_ms = svc.ask(
+        answer, latency_ms = llm_model_service.ask(
             question=question,
             max_new_tokens=max_tokens,
             temperature=temperature,
@@ -60,7 +71,10 @@ def create_chat_completion(
             model_name=req.model,
         )
     except Exception as exc:
-        raise HTTPException(status_code=503, detail="inference_unavailable") from exc
+        raise HTTPException(
+            status_code=503,
+            detail="Inference is currently unavailable because the model backend could not complete the request; please retry shortly.",
+        ) from exc
 
     created = int(time.time())
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
